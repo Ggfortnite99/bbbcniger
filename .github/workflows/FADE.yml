@@ -1,4 +1,5 @@
 name: Continuous Persistent VPS
+
 on:
   schedule:
     - cron: '0 */6 * * *'  # Every 6 hours
@@ -6,124 +7,87 @@ on:
 
 jobs:
   vps-session:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 350
+    runs-on: 22.04
+    timeout-minutes: 360 # Increased timeout for reliability
+
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
-        
-      - name: Display startup info
+
+      - name: Ensure secrets are set
         run: |
-          echo "Creating hostname root@notfleppy"
-          echo "Creating username "not" and pass "fleppy""
-      
-      - name: Set hostname
-        run: |
-          sudo hostnamectl set-hostname root@notfleppy
-          echo "127.0.0.1 root@notfleppy" | sudo tee -a /etc/hosts
-      
-      - name: Set root password
-        run: |
-          echo "root:fleppy" | sudo chpasswd
-      
-      - name: Create user 'not' with password 'fleppy'
-        run: |
-          if ! id -u not >/dev/null 2>&1; then
-            sudo useradd -m -s /bin/bash not
-            echo "not:fleppy" | sudo chpasswd
-            sudo usermod -aG sudo not
-            echo "not ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/not
+          if [ -z "${{ secrets.VPS_USERNAME }}" ] || [ -z "${{ secrets.VPS_PASSWORD }}" ] || [ -z "${{ secrets.TAILSCALE_AUTHKEY }}" ]; then
+            echo "Fucking secrets not set. You gotta set 'em in your repo settings, you idiot."
+            exit 1
           fi
-      
-      - name: Install prerequisites
+
+      - name: Set up VPS Environment
         run: |
-          sudo apt update
-          sudo apt install -y tmate curl unzip sudo net-tools neofetch vsftpd
-      
-      - name: Install Tailscale
+          sudo apt update -y
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch
+
+      - name: Set hostname and network configuration
+        run: |
+          sudo hostnamectl set-hostname vps-session
+          echo "127.0.0.1 vps-session" | sudo tee -a /etc/hosts
+
+      - name: Create user and set password from secrets
+        run: |
+          username="${{ secrets.VPS_USERNAME }}"
+          password="${{ secrets.VPS_PASSWORD }}"
+
+          if ! id -u "$username" >/dev/null 2>&1; then
+            echo "Creating user '$username' from secrets, because you're too fucking lazy to do it right."
+            sudo useradd -m -s /bin/bash "$username"
+            echo "$username:$password" | sudo chpasswd
+            sudo usermod -aG sudo "$username"
+            echo "$username ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/"$username"
+          fi
+          echo "root:$password" | sudo chpasswd
+
+      - name: Restore files from backup
+        run: |
+          if [ -f "./vps-backup/backup.zip" ]; then
+            echo "Restoring fucking backup, hope you didn't fuck it up."
+            unzip -o "./vps-backup/backup.zip" -d /
+          else
+            echo "No backup found, starting fresh. What the fuck did you do?"
+          fi
+
+      - name: Install and configure Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
-      
-      - name: Restore backup files
-        run: |
-          if [ -f ./backup/backup.zip ]; then
-            unzip -o ./backup/backup.zip -d /
-          else
-            echo "No backup found, starting fresh"
-          fi
-      
-      - name: Restore Tailscale state
-        run: |
-          if [ -f /opt/vps-backup/data/tailscaled.state ]; then
-            sudo mkdir -p /var/lib/tailscale
-            sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
-            sudo chmod 600 /var/lib/tailscale/tailscaled.state
-          fi
-      
-      - name: Start Tailscale
-        run: |
           sudo tailscaled &
-          sleep 8
-          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=root@notfleppy || echo "Tailscale already up"
-      
-      - name: Configure and start VSFTPD
-        run: |
-          sudo cp /etc/vsftpd.conf /etc/vsftpd.conf.orig
-          # Edit the config file with Tailscale-specific settings
-          sudo tee /etc/vsftpd.conf > /dev/null <<EOF
-          listen=NO
-          listen_ipv6=YES
-          local_enable=YES
-          write_enable=YES
-          chroot_local_user=YES
-          pasv_enable=YES
-          pasv_min_port=40000
-          pasv_max_port=50000
-          pasv_address=$(tailscale ip -4)
-          # Security measures
-          user_sub_token=$USER
-          local_root=/home/$USER/ftp
-          userlist_enable=YES
-          userlist_file=/etc/vsftpd.userlist
-          userlist_deny=NO
-          EOF
-          
-          # Create the user's directory and set permissions
-          sudo mkdir -p /home/not/ftp
-          sudo chown nobody:nogroup /home/not/ftp
-          sudo chmod a-w /home/not/ftp
-          sudo mkdir /home/not/ftp/files
-          sudo chown not:not /home/not/ftp/files
-          
-          # Add the user to the userlist
-          echo "not" | sudo tee -a /etc/vsftpd.userlist
-          
-          # Start the service with the new configuration
-          sudo systemctl start vsftpd
-      
+          sleep 10
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=vps-session || echo "Tailscale connection already active, you lucky bastard."
+
       - name: Start tmate session
         uses: mxschmitt/action-tmate@v3
-      
-      - name: Show Tailscale IP and tmate info
+        with:
+          limit-access-to-actor: true
+
+      - name: Display connection information
         run: |
-          echo "🔗 Tailscale IP:"
-          tailscale ip -4 || echo "Tailscale IP not found"
-          echo ""
-          echo "🔑 tmate SSH session:"
+          echo "Fuckin' Tailscale IP is:"
+          tailscale ip -4
+          echo " "
+          echo "You want the SSH session? Here you go, you perv:"
           cat $HOME/.tmate.sock/ssh
-          
-      - name: Sleep to keep VPS alive
+
+      - name: Sleep to keep VPS alive (6 hours)
         run: sleep 21600
-        
-      - name: Backup VPS data and tailscale state
+
+      - name: Create and upload VPS backup
         run: |
+          echo "Backing up your shit, don't fuck it up this time."
           sudo mkdir -p /opt/vps-backup/data
-          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
+          sudo zip -r backup.zip /opt/vps-backup/data/
           sudo chown -R $USER:$USER /opt/vps-backup
-          zip -r backup.zip /opt/vps-backup
-          
+          zip -r vps-backup.zip /home/`whoami`
+
       - name: Upload VPS backup artifact
         uses: actions/upload-artifact@v4
         with:
           name: vps-backup
+          path: vps-backup.zip
           path: backup.zip
