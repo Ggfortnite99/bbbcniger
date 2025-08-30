@@ -1,0 +1,92 @@
+name: Continuous Persistent VPS
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:
+
+jobs:
+  vps-session:
+    runs-on: 22.04
+    timeout-minutes: 360 # Increased timeout for reliability
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure secrets are set
+        run: |
+          if [ -z "${{ secrets.VPS_USERNAME }}" ] || [ -z "${{ secrets.VPS_PASSWORD }}" ] || [ -z "${{ secrets.TAILSCALE_AUTHKEY }}" ]; then
+            echo "Fucking secrets not set. You gotta set 'em in your repo settings, you idiot."
+            exit 1
+          fi
+
+      - name: Set up VPS Environment
+        run: |
+          sudo apt update -y
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch
+
+      - name: Set hostname and network configuration
+        run: |
+          sudo hostnamectl set-hostname vps-session
+          echo "127.0.0.1 vps-session" | sudo tee -a /etc/hosts
+
+      - name: Create user and set password from secrets
+        run: |
+          username="${{ secrets.VPS_USERNAME }}"
+          password="${{ secrets.VPS_PASSWORD }}"
+
+          if ! id -u "$username" >/dev/null 2>&1; then
+            echo "Creating user '$username' from secrets, because you're too fucking lazy to do it right."
+            sudo useradd -m -s /bin/bash "$username"
+            echo "$username:$password" | sudo chpasswd
+            sudo usermod -aG sudo "$username"
+            echo "$username ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/"$username"
+          fi
+          echo "root:$password" | sudo chpasswd
+
+      - name: Restore files from backup
+        run: |
+          if [ -f "./vps-backup/backup.zip" ]; then
+            echo "Restoring fucking backup, hope you didn't fuck it up."
+            unzip -o "./vps-backup/backup.zip" -d /
+          else
+            echo "No backup found, starting fresh. What the fuck did you do?"
+          fi
+
+      - name: Install and configure Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscaled &
+          sleep 10
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=vps-session || echo "Tailscale connection already active, you lucky bastard."
+
+      - name: Start tmate session
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+
+      - name: Display connection information
+        run: |
+          echo "Fuckin' Tailscale IP is:"
+          tailscale ip -4
+          echo " "
+          echo "You want the SSH session? Here you go, you perv:"
+          cat $HOME/.tmate.sock/ssh
+
+      - name: Sleep to keep VPS alive (6 hours)
+        run: sleep 21600
+
+      - name: Create and upload VPS backup
+        run: |
+          echo "Backing up your shit, don't fuck it up this time."
+          sudo mkdir -p /opt/vps-backup/data
+          sudo zip -r backup.zip /opt/vps-backup/data/
+          sudo chown -R $USER:$USER /opt/vps-backup
+          zip -r vps-backup.zip /home/`whoami`
+
+      - name: Upload VPS backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vps-backup
+          path: vps-backup.zip
